@@ -2,7 +2,7 @@ import numpy as np
 import os
 import torch
 import torch.nn as nn
-
+import torch.optim as optim
 
 def denormalize_image(image, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]):
     image = np.transpose(image, (2, 0, 1))
@@ -41,24 +41,11 @@ def save_model(model, optimizer, epoch, lr, model_version):
     )
 
 
-def load_model(model, optimizer, path, mode="train"):
-    checkpoint = torch.load(path, map_location="cpu")
+def load_model(model, optimizer, path):
+    checkpoint = torch.load(path, map_location="cuda")
     model.load_state_dict(checkpoint["model_state_dict"])
-
-    if mode == "train":
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-
-        # Add the initial_lr to the optimizer's param_groups
-        for param_group in optimizer.param_groups:
-            param_group["initial_lr"] = checkpoint["lr"]
-
-        start_epoch = checkpoint["epoch"]
-        lr = checkpoint["lr"]
-    else:
-        start_epoch = checkpoint["epoch"]
-        lr = None
-
-    return model, optimizer, start_epoch, lr
+    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    return model
 
 
 def get_next_version(model_version):
@@ -77,3 +64,24 @@ def initialize_weights(m):
     elif isinstance(m, nn.BatchNorm2d):
         nn.init.constant_(m.weight.data, 1)
         nn.init.constant_(m.bias.data, 0)
+
+class HaversineMSELoss(nn.Module):
+    def __init__(self):
+        super(HaversineMSELoss, self).__init__()
+        self.R = 6371.0  # Earth's radius in km
+
+    def forward(self, output, target):
+        lat1, lon1 = output[:, 0], output[:, 1]
+        lat2, lon2 = target[:, 0], target[:, 1]
+        
+        lat1, lon1, lat2, lon2 = map(torch.deg2rad, [lat1, lon1, lat2, lon2])
+
+        dlon = lon2 - lon1
+        dlat = lat2 - lat1
+
+        a = torch.sin(dlat / 2) ** 2 + torch.cos(lat1) * torch.cos(lat2) * torch.sin(dlon / 2) ** 2
+        c = 2 * torch.atan2(a.sqrt(), (1 - a).sqrt())
+        haversine_distance = self.R * c
+
+        return torch.mean((haversine_distance)**2)
+

@@ -12,55 +12,22 @@ def patchify(images, patch_size):
     return patches
 
 
-def get_positional_embeddings(sequence_length, d):
-    result = torch.ones(sequence_length, d)
-    for i in range(sequence_length):
-        for j in range(d):
-            result[i][j] = (
-                np.sin(i / (10000 ** (j / d)))
-                if j % 2 == 0
-                else np.cos(i / (10000 ** ((j - 1) / d)))
-            )
-    return result
+def get_positional_embeddings(sequence_length, hidden_size, device="cuda"):
+    position_ids = torch.arange(sequence_length, dtype=torch.long, device=device)
+    position_embeddings = nn.Embedding(sequence_length, hidden_size)
+    return position_embeddings(position_ids)
 
 
-class MyMSA(nn.Module):
+class MSA(nn.Module):
     def __init__(self, d, n_heads=2):
-        super(MyMSA, self).__init__()
-        self.d = d
-        self.n_heads = n_heads
+        super(MSA, self).__init__()
+        self.self_attention = nn.MultiheadAttention(d, n_heads)
 
-        assert d % n_heads == 0, f"Can't divide dimension {d} into {n_heads} heads"
-
-        d_head = int(d / n_heads)
-        self.q_mappings = nn.ModuleList(
-            [nn.Linear(d_head, d_head) for _ in range(self.n_heads)]
-        )
-        self.k_mappings = nn.ModuleList(
-            [nn.Linear(d_head, d_head) for _ in range(self.n_heads)]
-        )
-        self.v_mappings = nn.ModuleList(
-            [nn.Linear(d_head, d_head) for _ in range(self.n_heads)]
-        )
-        self.d_head = d_head
-        self.softmax = nn.Softmax(dim=-1)
-
-    def forward(self, sequences):
-        result = []
-        for sequence in sequences:
-            seq_result = []
-            for head in range(self.n_heads):
-                q_mapping = self.q_mappings[head]
-                k_mapping = self.k_mappings[head]
-                v_mapping = self.v_mappings[head]
-
-                seq = sequence[:, head * self.d_head : (head + 1) * self.d_head]
-                q, k, v = q_mapping(seq), k_mapping(seq), v_mapping(seq)
-
-                attention = self.softmax(q @ k.T / (self.d_head**0.5))
-                seq_result.append(attention @ v)
-            result.append(torch.hstack(seq_result))
-        return torch.cat([torch.unsqueeze(r, dim=0) for r in result])
+    def forward(self, x):
+        x = x.unsqueeze(0)  # Add a dimension for sequence length
+        attn_output, _ = self.self_attention(x, x, x)
+        attn_output = attn_output.squeeze(0)  # Remove the added dimension
+        return attn_output
 
 
 class GeoViTBlock(nn.Module):
@@ -70,46 +37,62 @@ class GeoViTBlock(nn.Module):
         self.n_heads = n_heads
 
         self.norm1 = nn.LayerNorm(hidden_d)
-        self.mhsa = MyMSA(hidden_d, n_heads)
+        self.linear1 = nn.Linear(hidden_d, hidden_d)
+        self.mhsa = MSA(hidden_d, n_heads)
         self.norm2 = nn.LayerNorm(hidden_d)
         self.mlp = nn.Sequential(
             nn.Linear(hidden_d, mlp_ratio * hidden_d),
             nn.GELU(),
-            nn.LayerNorm(mlp_ratio * hidden_d),
             nn.Linear(mlp_ratio * hidden_d, hidden_d),
         )
+        self.linear2 = nn.Linear(hidden_d, hidden_d)
 
     def forward(self, x):
-        out = x + self.mhsa(self.norm1(x))
-        out = out + self.mlp(self.norm2(out))
+        out = self.linear1(self.norm1(x))
+        out = out + self.mhsa(out)
+        out = self.linear2(self.norm2(out))
+        out = out + self.mlp(out)
         return out
 
 
-class GeoViT(nn.Module):
-    def __init__(self, pretrained_model_name='google/vit-base-patch16-224', hidden_d=768, n_heads=12):
-        super(GeoViT, self).__init__()
+class ExtendedGeoViT(nn.Module):
+    def __init__(
+        self,
+        pretrained_model_name="google/vit-base-patch16-224",
+        hidden_d=768,
+        n_heads=12,
+        n_transformer_blocks=3,
+    ):
+        super(ExtendedGeoViT, self).__init__()
 
-        # Load the pretrained ViT model
         self.vit = ViTModel.from_pretrained(pretrained_model_name)
+        self.vit.classifier = nn.Identity()
+        self.layer_norm = nn.LayerNorm(hidden_d)
+        self.dropout = nn.Dropout(0.1)
+        self.additional_blocks = nn.ModuleList(
+            [
+                self._make_block(hidden_d // (2**i), n_heads)
+                for i in range(n_transformer_blocks)
+            ]
+        )
+        self.final_classifier = nn.Linear(hidden_d // (2**n_transformer_blocks), 2)
 
-        # Or use timm to load the model
-        # self.vit = timm.create_model('vit_base_patch16_224', pretrained=True)
-
-        # Replace the classifier with a new one (note that '768' is the dimension of the output tensor from ViT)
-        self.vit.classifier = nn.Linear(hidden_d, 2)
+    def _make_block(self, hidden_d, n_heads):
+        layers = [
+            nn.Linear(hidden_d, hidden_d // 2),
+            GeoViTBlock(hidden_d // 2, n_heads),
+        ]
+        return nn.Sequential(*layers)
 
     def forward(self, images):
-        # Forward pass through the base ViT model
         outputs = self.vit(images)
-
-        # We only need the last hidden state from the outputs
         last_hidden_state = outputs.last_hidden_state
-
-        # Get the output of the classification token
-        # The classification token corresponds to the first element in the sequence
         cls_output = last_hidden_state[:, 0]
+        normalized_logits = self.layer_norm(cls_output)
+        dropped_logits = self.dropout(normalized_logits)
+        extended_features = dropped_logits
+        for block in self.additional_blocks:
+            extended_features = block(extended_features)
+        final_logits = self.final_classifier(extended_features)
 
-        # Pass the output through the classifier
-        logits = self.vit.classifier(cls_output)
-
-        return logits
+        return final_logits

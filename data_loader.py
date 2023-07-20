@@ -67,6 +67,7 @@ def get_dataloaders(config):
     batch_size = config["batch_size"]
     image_size = config["image_size"]
     workers = config["workers"]
+    pin_memory = config["pin_memory"]
 
     AUGMENTATIONS_TRAIN = Compose(
         [
@@ -108,11 +109,43 @@ def get_dataloaders(config):
     td = MsgPackData(data=train_data, transform=AUGMENTATIONS_TRAIN)
     vd = MsgPackData(data=val_data, transform=AUGMENTATIONS_VAL)
 
-    trainloader = DataLoader(td, batch_size=batch_size, shuffle=True, num_workers=workers)
-    valloader = DataLoader(vd, batch_size=batch_size, shuffle=False, num_workers=0)
+    trainloader = DataLoader(td, batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=pin_memory)
+    valloader = DataLoader(vd, batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=pin_memory)
 
     print(
         f"Train dataset size {len(trainloader.dataset)}, validation dataset {len(valloader.dataset)}"
     )
 
     return trainloader, valloader
+
+def get_eval_data(config, n=500):
+    start_idx = config["start_idx"]
+    num_shards = config["num_shards"]
+    batch_size = config["batch_size"]
+    image_size = config["image_size"]
+    workers = config["workers"]
+    pin_memory = config["pin_memory"]
+
+    AUGMENTATIONS_TEST = Compose(
+        [
+            Resize(image_size, image_size),
+            Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ToTensorV2(),
+        ]
+    )
+
+    all_shard_fnames = glob.glob(os.path.join(DIR, "*.msg"))
+    selected_shard_fnames = all_shard_fnames[start_idx : start_idx + num_shards]
+
+    all_data = load_data_from_shards(selected_shard_fnames)
+    
+    # Select only the first n elements
+    all_data = all_data[:n]
+    
+    eval_data = MsgPackData(data=all_data, transform=AUGMENTATIONS_TEST)
+
+    evalloader = DataLoader(eval_data, batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=pin_memory)
+
+    print(f"Eval dataset size: {len(evalloader.dataset)}")
+
+    return evalloader

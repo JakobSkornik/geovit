@@ -3,9 +3,10 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.cuda.amp import GradScaler, autocast
 from tqdm import tqdm
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from data_loader import get_dataloaders
-from model import GeoViT
+from model import ExtendedGeoViT
 from utils import save_model
 
 
@@ -15,42 +16,36 @@ def train_one_epoch(
     device,
     optimizer,
     criterion,
-    scheduler,
     pbar,
-    grad_accum_steps=4,  # Number of steps to accumulate gradients
+    grad_accum_steps=8,
 ):
-    scaler = GradScaler()  # Initialize GradScaler for mixed precision training
+    scaler = GradScaler()
 
     running_loss = 0.0
-    total_samples = 0  # Keep track of total number of samples
+    total_samples = 0
 
-    model.zero_grad()  # Initialize gradients to zero before each backward pass
+    for param in model.parameters():
+        param.grad = None
 
     for i, data in enumerate(trainloader, 0):
         inputs, coordinates = data["image"].to(device), data["coordinates"].to(device)
-        batch_size = inputs.shape[0]  # Get batch size
-        total_samples += batch_size  # Add to total
+        batch_size = inputs.shape[0]
+        total_samples += batch_size
 
-        # Forward pass, backward pass
-        with autocast():  # Enable autocasting for mixed precision training
+        with autocast():
             outputs = model(inputs)
             loss = criterion(outputs, coordinates)
-
-        # Scales the loss, and calls backward() to create scaled gradients
         scaler.scale(loss).backward()
 
         # Gradient accumulation
         if (i + 1) % grad_accum_steps == 0 or i + 1 == len(trainloader):
-            # Unscales the gradients of optimizer's assigned params in-place
             scaler.unscale_(optimizer)
-            # Since the gradients of optimizer's assigned params are unscaled, clips as usual
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            # Unscales gradients and calls or skips optimizer.step()
             scaler.step(optimizer)
-            # Updates the scale for next iteration
             scaler.update()
-            # Zero the gradients after updating
-            optimizer.zero_grad()
+
+            for param in model.parameters():
+                param.grad = None
 
         running_loss += loss.item() * batch_size  # Multiply by batch size
 
@@ -58,13 +53,10 @@ def train_one_epoch(
         pbar.set_postfix(
             **{
                 "train_loss": running_loss / total_samples,  # Divide by total samples
-                "lr": optimizer.param_groups[0]["lr"],
+                "lr": optimizer.param_groups[-1]["lr"],
             }
         )
         pbar.update(batch_size)
-
-    # Step the learning rate scheduler
-    scheduler.step()
 
     return running_loss / total_samples
 
@@ -73,38 +65,71 @@ def main():
     # Dataloader config
     config = {
         # Dataloader config
-        "start_idx": 0,
+        "start_idx": 1,
         "num_shards": 10,
-        "batch_size": 16,
-        "workers": 8,
+        "batch_size": 32,
+        "workers": 3,
+        "pin_memory": True,
         "image_size": 224,
         # Training config
         "device": "cuda",
-        "num_epochs": 10,
-        "initial_lr": 1e-5,
+        "num_epochs": 30,
+        "initial_lr": 5e-5,
+        "pretrained_lr": 5e-6,
         "model_name": f"dev",
+        "save": True,
     }
 
     train_dataloader, val_dataloader = get_dataloaders(config)
 
-    checkpoints = True
+    checkpoints = config["save"]
 
-    model = GeoViT()
+    model = ExtendedGeoViT()
     device = config["device"]
     model.to(device)
     print(f"Using device: {device}")
 
-    # Set up the loss function and optimizer
+    # Set up the loss function
     criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=config["initial_lr"])
+
+    # Define two groups of parameters: one for the ViT base without the classifier and one for the classifier
+    no_decay = ["bias", "LayerNorm.weight"]  # Parameters not to apply weight decay on
+
+    vit_parameters = model.vit.named_parameters()
+    added_block_parameters = model.additional_blocks.parameters()
+    final_classifier_parameters = model.final_classifier.parameters()
+
+    optimizer_grouped_parameters = [
+        {
+            "params": [
+                p for n, p in vit_parameters if not any(nd in n for nd in no_decay)
+            ],
+            "lr": config["pretrained_lr"],
+            "weight_decay": 0.0,
+        },
+        {
+            "params": [p for n, p in vit_parameters if any(nd in n for nd in no_decay)],
+            "lr": config["pretrained_lr"],
+            "weight_decay": 0.0,
+        },
+        {
+            "params": added_block_parameters,
+            "lr": config["initial_lr"],
+            "weight_decay": 0.0,
+        },
+        {
+            "params": final_classifier_parameters,
+            "lr": config["initial_lr"],
+            "weight_decay": 0.0,
+        },
+    ]
+    optimizer = optim.AdamW(optimizer_grouped_parameters)
 
     if checkpoints:
         model_name = config["model_name"]
 
     # Define the learning rate scheduler
-    scheduler = scheduler = optim.lr_scheduler.StepLR(
-        optimizer, gamma=0.97, step_size=1
-    )
+    scheduler = CosineAnnealingLR(optimizer, T_max=config["num_epochs"])
 
     def validation_loss(valloader):
         total_val_loss = 0
@@ -126,14 +151,16 @@ def main():
             unit="img",
         ) as pbar:
             train_loss = train_one_epoch(
-                model, train_dataloader, device, optimizer, criterion, scheduler, pbar
+                model, train_dataloader, device, optimizer, criterion, pbar
             )
             val_loss = validation_loss(val_dataloader)
-            lr = optimizer.param_groups[0]["lr"]
+            lr_pretrained = optimizer.param_groups[0]["lr"]
+            lr = optimizer.param_groups[-1]["lr"]
             pbar.set_postfix(
-                **{"train_loss": train_loss, "val_loss": val_loss, "lr": lr}
+                **{"train_loss": train_loss, "val_loss": val_loss, "lr_pretrained": lr_pretrained, "lr": lr}
             )
             pbar.update()
+        scheduler.step()
 
         if checkpoints:
             save_model(model, optimizer, epoch, lr, model_name)
