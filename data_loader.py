@@ -38,6 +38,40 @@ def get_image(record):
     return Image.open(io.BytesIO(record["image"]))
 
 
+class StreetViewDataset(Dataset):
+    def __init__(self, img_dir, transform=None):
+        self.img_dir = img_dir
+        self.img_fnames = os.listdir(img_dir)
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.img_fnames)
+
+    def __getitem__(self, idx):
+        img_path = os.path.join(self.img_dir, self.img_fnames[idx])
+        image = Image.open(img_path).convert("RGB")
+        if self.transform:
+            transformed = self.transform(image=np.array(image))
+            image = transformed["image"]
+
+        # Parse coordinates from filename
+        coords = self.img_fnames[idx][:-4]
+        split_coords = coords.split(",")
+        if len(split_coords) != 2:
+            raise ValueError(
+                f"Filename {self.img_fnames[idx]} is not in the expected format latitude,longitude.jpg"
+            )
+
+        latitude, longitude = map(float, split_coords)
+
+        coordinates = torch.tensor(
+            normalize_coordinates([latitude, longitude]),
+            dtype=torch.float32,
+        )
+
+        return {"image": image, "coordinates": coordinates}
+
+
 class MsgPackData(Dataset):
     def __init__(self, data, transform=None):
         self.data = data
@@ -109,14 +143,27 @@ def get_dataloaders(config):
     td = MsgPackData(data=train_data, transform=AUGMENTATIONS_TRAIN)
     vd = MsgPackData(data=val_data, transform=AUGMENTATIONS_VAL)
 
-    trainloader = DataLoader(td, batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=pin_memory)
-    valloader = DataLoader(vd, batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=pin_memory)
+    trainloader = DataLoader(
+        td,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=workers,
+        pin_memory=pin_memory,
+    )
+    valloader = DataLoader(
+        vd,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=workers,
+        pin_memory=pin_memory,
+    )
 
     print(
         f"Train dataset size {len(trainloader.dataset)}, validation dataset {len(valloader.dataset)}"
     )
 
     return trainloader, valloader
+
 
 def get_eval_data(config, n=500):
     start_idx = config["start_idx"]
@@ -138,13 +185,52 @@ def get_eval_data(config, n=500):
     selected_shard_fnames = all_shard_fnames[start_idx : start_idx + num_shards]
 
     all_data = load_data_from_shards(selected_shard_fnames)
-    
+
     # Select only the first n elements
     all_data = all_data[:n]
-    
+
     eval_data = MsgPackData(data=all_data, transform=AUGMENTATIONS_TEST)
 
-    evalloader = DataLoader(eval_data, batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=pin_memory)
+    evalloader = DataLoader(
+        eval_data,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=workers,
+        pin_memory=pin_memory,
+    )
+
+    print(f"Eval dataset size: {len(evalloader.dataset)}")
+
+    return evalloader
+
+
+def get_streetview_test(config, n=500):
+    batch_size = config["batch_size"]
+    image_size = config["image_size"]
+    workers = config["workers"]
+    pin_memory = config["pin_memory"]
+
+    AUGMENTATIONS_TEST = Compose(
+        [
+            Resize(image_size, image_size),
+            Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ToTensorV2(),
+        ]
+    )
+
+    test_folder = "test"
+    all_data = StreetViewDataset(img_dir=test_folder, transform=AUGMENTATIONS_TEST)
+
+    # Select only the first n elements
+    all_data.img_fnames = all_data.img_fnames[:n]
+
+    evalloader = DataLoader(
+        all_data,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=workers,
+        pin_memory=pin_memory,
+    )
 
     print(f"Eval dataset size: {len(evalloader.dataset)}")
 

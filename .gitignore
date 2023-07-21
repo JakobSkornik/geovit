@@ -1,3 +1,4 @@
 shards/
+test/
 *.pth
 __pycache__
