@@ -1,13 +1,13 @@
 import torch
-import torch.nn as nn
 import torch.optim as optim
 from torch.cuda.amp import GradScaler, autocast
 from tqdm import tqdm
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
-from data_loader import get_dataloaders
-from model import ExtendedGeoViT
+from data_loader import get_europe
+from model import RegressionGeoViT
 from utils import save_model
+from HFILoss import WeightedMSELoss
 
 
 def train_one_epoch(
@@ -65,8 +65,8 @@ def main():
     # Dataloader config
     config = {
         # Dataloader config
-        "start_idx": 1,
-        "num_shards": 10,
+        # "start_idx": 0,
+        # "num_shards": 10,
         "batch_size": 32,
         "workers": 3,
         "pin_memory": True,
@@ -74,23 +74,23 @@ def main():
         # Training config
         "device": "cuda",
         "num_epochs": 30,
-        "initial_lr": 5e-5,
-        "pretrained_lr": 5e-6,
-        "model_name": f"dev",
+        "initial_lr": 1e-4,
+        "pretrained_lr": 1e-7,
+        "model_name": f"50e_panoramas_weighted_mse",
         "save": True,
     }
 
-    train_dataloader, val_dataloader = get_dataloaders(config)
+    train_dataloader, val_dataloader = get_europe(config)
 
     checkpoints = config["save"]
 
-    model = ExtendedGeoViT()
+    model = RegressionGeoViT()
     device = config["device"]
     model.to(device)
     print(f"Using device: {device}")
 
     # Set up the loss function
-    criterion = nn.MSELoss()
+    criterion = WeightedMSELoss(alpha=0.01, heatmap_file="europe/heatmap.json")
 
     # Define two groups of parameters: one for the ViT base without the classifier and one for the classifier
     no_decay = ["bias", "LayerNorm.weight"]  # Parameters not to apply weight decay on
@@ -163,7 +163,7 @@ def main():
         scheduler.step()
 
         if checkpoints:
-            save_model(model, optimizer, epoch, lr, model_name)
+            save_model(model, optimizer, epoch, model_name)
 
     print("Finished training")
     model.eval()

@@ -3,6 +3,8 @@ import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.cuda.amp import GradScaler, autocast
+
 
 def denormalize_image(image, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]):
     image = np.transpose(image, (2, 0, 1))
@@ -29,13 +31,12 @@ def denormalize_coordinates(coords):
     return latitude, longitude
 
 
-def save_model(model, optimizer, epoch, lr, model_version):
+def save_model(model, optimizer, epoch, model_version):
     torch.save(
         {
             "epoch": epoch,
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
-            "lr": lr,
         },
         f"{model_version}.pth",
     )
@@ -65,6 +66,7 @@ def initialize_weights(m):
         nn.init.constant_(m.weight.data, 1)
         nn.init.constant_(m.bias.data, 0)
 
+
 class HaversineMSELoss(nn.Module):
     def __init__(self):
         super(HaversineMSELoss, self).__init__()
@@ -73,15 +75,17 @@ class HaversineMSELoss(nn.Module):
     def forward(self, output, target):
         lat1, lon1 = output[:, 0], output[:, 1]
         lat2, lon2 = target[:, 0], target[:, 1]
-        
+
         lat1, lon1, lat2, lon2 = map(torch.deg2rad, [lat1, lon1, lat2, lon2])
 
         dlon = lon2 - lon1
         dlat = lat2 - lat1
 
-        a = torch.sin(dlat / 2) ** 2 + torch.cos(lat1) * torch.cos(lat2) * torch.sin(dlon / 2) ** 2
+        a = (
+            torch.sin(dlat / 2) ** 2
+            + torch.cos(lat1) * torch.cos(lat2) * torch.sin(dlon / 2) ** 2
+        )
         c = 2 * torch.atan2(a.sqrt(), (1 - a).sqrt())
         haversine_distance = self.R * c
 
-        return torch.mean((haversine_distance)**2)
-
+        return torch.mean((haversine_distance) ** 2)

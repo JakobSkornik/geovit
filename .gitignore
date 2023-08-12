@@ -1,4 +1,7 @@
 shards/
+train/
 test/
+val/
+streetviews/
 *.pth
 __pycache__

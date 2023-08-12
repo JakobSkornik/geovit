@@ -24,9 +24,9 @@ class MSA(nn.Module):
         self.self_attention = nn.MultiheadAttention(d, n_heads)
 
     def forward(self, x):
-        x = x.unsqueeze(0)  # Add a dimension for sequence length
+        x = x.unsqueeze(0)
         attn_output, _ = self.self_attention(x, x, x)
-        attn_output = attn_output.squeeze(0)  # Remove the added dimension
+        attn_output = attn_output.squeeze(0)
         return attn_output
 
 
@@ -55,7 +55,7 @@ class GeoViTBlock(nn.Module):
         return out
 
 
-class ExtendedGeoViT(nn.Module):
+class RegressionGeoViT(nn.Module):
     def __init__(
         self,
         pretrained_model_name="google/vit-base-patch16-224",
@@ -63,7 +63,7 @@ class ExtendedGeoViT(nn.Module):
         n_heads=12,
         n_transformer_blocks=3,
     ):
-        super(ExtendedGeoViT, self).__init__()
+        super(RegressionGeoViT, self).__init__()
 
         self.vit = ViTModel.from_pretrained(pretrained_model_name)
         self.vit.classifier = nn.Identity()
